@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+#
+# Copyright 2018, David Runge
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+
+warning="WARNING:"
+change="CHANGE:"
+info="INFO:"
+
+kernel_release=""
+kernel_config=""
+
+sysctl_ref="(see \`man 5 sysctl.conf\`, \`man 5 sysctl.d\` or \`man 8 sysctl\` for reference)"
+
+check_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "Use this script as an unprivileged user."
+    exit 1
+  fi
+}
+
+check_kernel_name() {
+  if [[ "$(uname -s)" != *Linux* ]]; then
+    echo "This script needs to be run on a Linux system."
+    exit 1
+  fi
+}
+
+get_kernel_config_location() {
+  local default_location="/proc/config.gz"
+  local boot_location="/boot/config-${kernel_release}"
+  if [ -r "${default_location}" ]; then
+    echo "${default_location}"
+    return
+  elif [ -r "${boot_location}" ]; then
+    echo "${boot_location}"
+    return
+  else
+    echo ""
+    return
+  fi
+}
+
+kernel_config_has() {
+  local config="$1"
+  local grep_cmd="zgrep"
+  if [[ "${kernel_config}" != *.gz ]]; then
+    grep_cmd="grep"
+  fi
+  if $grep_cmd -q "$config" "$kernel_config"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+kernel_cmdline_has() {
+  local search="$1"
+  if ! grep -q "${search}" /proc/cmdline; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+check_virtualization() {
+  local virt_type=""
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    set +e
+    virt_type=$(systemd-detect-virt)
+    set -e
+    if systemd-detect-virt -q; then
+      echo "$change Running in a virtual machine or container (type: ${virt_type}). This is not recommended!" 
+    fi
+  else
+    echo "$warning Unable to detect if in a virtual machine."
+  fi
+}
+
+check_filesystems() {
+  local mount_points=()
+  local mount_point_data=()
+  local what=""
+  local where=""
+  local type=""
+  local options=""
+  mapfile -t mount_points < <( mount |grep -E "^/dev" )
+  for mount_point in "${mount_points[@]}"; do
+    mapfile -d " " -t mount_point_data < <( echo "${mount_point}" )
+    what="${mount_point_data[0]}"
+    where="${mount_point_data[2]}"
+    type="${mount_point_data[4]}"
+    options="${mount_point_data[5]}"
+    if [[ "$where" != /boot* ]]; then
+      if [[ "$options" != *relatime* ]] && [[ "$options" != *noatime* ]]; then
+        echo "$change $what mounted on $where (type $type) should use the relatime mount option for performance."
+      fi
+      if [[ "$type" == *fuse* ]] || [[ "$type" == *reiserfs* ]] || [[ "$type" == *vfat* ]]; then
+        echo "$info $what mounted on $where (type $type) is not a good filesystem for large files or realtime use."
+      fi
+    fi
+  done
+}
+
+check_groups() {
+  local groups=""
+  groups=$(groups)
+  if [[ "$groups" != *audio* ]]; then
+    echo "$info Consider adding your user to the audio group. On some distributions it's used for elevated resource limits."
+  fi
+  if [[ "$groups" != *realtime* ]]; then
+    echo "$info Consider adding your user to the realtime group. On some distributions it's used for elevated resource limits."
+  fi
+}
+
+check_ulimits() {
+  local limits_ref="(see \`man limits.conf\` for reference)"
+  if [[ "$(ulimit -t)" != "unlimited" ]]; then
+    echo "$change The CPU limit for your user is not unlimited $limits_ref."
+  fi
+  if [[ "$(ulimit -l)" != "unlimited" ]]; then
+    echo "$change The locked-in-memory limit for your user is not unlimited $limits_ref."
+  fi
+  if [ "$(ulimit -r)" -le 50 ]; then
+    echo "$change The maximum rt priority for your user ($(ulimit -r)) is very low. Consider increasing it up to 98 $limits_ref."
+  fi
+}
+
+check_vm_swappiness() {
+  local minimum=10
+  local proc_file="/proc/sys/vm/swappiness"
+  if [ "$(cat "$proc_file")" -gt $minimum ]; then
+    echo "$info Consider decreasing 'vm.swappiness<=$minimum' to prevent early write to swap $sysctl_ref."
+  fi
+}
+
+check_max_user_watches() {
+  local minimum=524288
+  local proc_file="/proc/sys/fs/inotify/max_user_watches"
+  if [ "$(cat "$proc_file")" -lt $minimum ]; then
+    echo "$change Consider increasing 'fs.inotify.max_user_watches>$minimum' (default) - the maximum amount of files inotify can watch $sysctl_ref."
+  fi
+}
+
+check_cpu_governor() {
+  local policy_dir="/sys/devices/system/cpu/cpufreq/"
+  local cpupower_ref="(see \`man cpupower\` for reference)"
+  local governor=""
+  local policy_no=""
+  local cpu_no=""
+  if [ -d "${policy_dir}/policy0" ]; then
+    for governor_file in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+      governor="$(cat "$governor_file")"
+      policy_no="$(echo "$governor_file"| cut -d'/' -f7)"
+      cpu_no="${policy_no//policy}"
+      if [[ "$governor" != "performance" ]]; then
+        echo "$change CPU $cpu_no has governor $governor set. Set it to 'performance' $cpupower_ref."
+      fi
+    done
+  else
+    echo "$warning Unable to detect any CPU governor on your machine. ${policy_dir} is empty!"
+  fi
+}
+
+check_config_high_res_timers() {
+  local config="CONFIG_HIGH_RES_TIMERS=y"
+  local config_ref="(see \`man 7 time\` for reference)"
+  if ! kernel_config_has "$config"; then
+    echo "$change CONFIG_HIGH_RES_TIMERS needs to be activated for your kernel $config_ref."
+  fi
+}
+
+check_config_no_hz() {
+  local configs=( 'CONFIG_NO_HZ_COMMON=y' 'CONFIG_NO_HZ_FULL=y' 'CONFIG_NO_HZ=y')
+  local config_ref="(see https://elinux.org/Kernel_Timer_Systems#Dynamic_ticks for reference)"
+  for config in "${configs[@]}"; do
+    if ! kernel_config_has "$config"; then
+      echo "$change $config needs to be set for your kernel for 'dynamic ticks' support $config_ref."
+    fi
+  done
+}
+
+check_config_preempt_rt() {
+  local configs=( 'CONFIG_PREEMPT_RT=y' 'CONFIG_PREEMPT_RT_FULL=y' )
+  local config_ref="(see https://wiki.linuxfoundation.org/realtime for reference)"
+  if ! kernel_config_has "${configs[0]}" && ! kernel_config_has "${configs[1]}"; then
+    echo "$change The PREEMPT_RT patch set (${configs[*]}) is not available on your kernel $config_ref."
+  fi
+}
+
+check_config_irq_forced_threading() {
+  local configs=( 'CONFIG_IRQ_FORCED_THREADING=y' 'CONFIG_PREEMPT=y' )
+  local config_ref="(see https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html for reference)"
+  if ! kernel_config_has "${configs[0]}"; then
+    if kernel_config_has "${configs[1]}" && ! kernel_cmdline_has "threadirqs"; then
+      echo "$change Without ${configs[0]} but with ${configs[1]} support on your kernel, you can still use the threadirqs kernel parameter $config_ref." 
+    else
+      echo "$change Your kernel neither supports ${configs[0]} nor ${configs[1]}." 
+    fi
+  fi
+}
+
+check_legacy_timers() {
+  local hpet_file="/dev/hpet"
+  local rtc_file="/dev/rtc0"
+  local hpet_ref="(see https://wiki.linuxaudio.org/wiki/system_configuration#timers for reference)"
+  if [ ! -w "$hpet_file" ]; then
+    echo "$info $hpet_file is not writable by your user. Some legacy software requires it $hpet_ref."
+  fi
+  if [ ! -w "$rtc_file" ]; then
+    echo "$info $rtc_file is not writable by your user. Some legacy software requires it $hpet_ref."
+  fi
+}
+
+check_cpu_dma_latency() {
+  local dev_file="/dev/cpu_dma_latency"
+  if [ ! -w "$dev_file" ]; then
+    echo "$change $dev_file needs to be writable by your user to prevent deep CPU sleep states."
+  fi
+}
+
+check_coupled_interrupts() {
+  local interrupts=()
+  local interrupt_delim=", "
+  local interrupt_number=""
+  local interrupt_ref="(see \`cat /proc/interrupts\` for more and consider using rtirq)"
+  mapfile -t interrupts < <( cat /proc/interrupts )
+  for interrupt_line in "${interrupts[@]}"; do
+    interrupt_number="$(echo "$interrupt_line"| cut -d':' -f1)"
+    if [[ "$interrupt_line" == *"$interrupt_delim"* ]]; then
+      echo "$change IRQ$interrupt_number has coupled interrupts $interrupt_ref."
+    fi
+  done
+}
+
+check_irqbalance() {
+  if pgrep -i irqbalance >/dev/null 2>&1; then
+    echo "$change The irqbalance service is running on your system. It might interfere, so consider disabling it."
+  fi
+}
+
+check_for_useful_tools() {
+  local tools=( cyclictest htop iostat iotop rtirq schedtool tuna )
+  for tool in "${tools[@]}";do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "$info Consider installing and using $tool."
+    fi
+  done
+}
+
+check_kernel_name
+check_root
+check_virtualization
+kernel_release=$(uname -r)
+kernel_config=$(get_kernel_config_location)
+if [ -n "${kernel_config}" ]; then
+  check_config_high_res_timers
+  check_config_no_hz
+  check_config_preempt_rt
+  check_config_irq_forced_threading
+else
+  echo "$warning The kernel config could not be found or accessed (e.g. /proc/config.gz or below /boot/config-*)."
+fi
+
+check_filesystems
+check_groups
+check_ulimits
+check_max_user_watches
+check_legacy_timers
+check_vm_swappiness
+check_cpu_governor
+check_cpu_dma_latency
+check_coupled_interrupts
+check_irqbalance
+check_for_useful_tools
