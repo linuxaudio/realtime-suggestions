@@ -100,7 +100,9 @@ check_filesystems() {
   local options=""
   mapfile -t mount_points < <( mount |grep -E "^/dev" )
   for mount_point in "${mount_points[@]}"; do
-    mapfile -d " " -t mount_point_data < <( echo "${mount_point}" )
+    set +e
+    IFS=$'\n' read -d "" -ra mount_point_data <<< "${mount_point//' '/$'\n'}"
+    set -e
     what="${mount_point_data[0]}"
     where="${mount_point_data[2]}"
     type="${mount_point_data[4]}"
