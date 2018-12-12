@@ -21,6 +21,7 @@ check:
 
 install:
 	install -vDm 755 $(SCRIPTFILE) -t $(DESTDIR)/$(BINDIR)
+	install -vdm 755 $(DESTDIR)/$(DOCDIR)
 	install -vDm 644 $(README) -t $(DESTDIR)/$(DOCDIR)
 
 uninstall:
