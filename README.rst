@@ -1,6 +1,9 @@
 realtime-suggestions
 ====================
 
+.. image:: https://travis-ci.org/linuxaudio/realtime-suggestions.svg?branch=master
+   :target: https://travis-ci.org/linuxaudio/realtime-suggestions
+
 A bash script, that suggests optimization options (while not stating the
 obvious) for Linux kernel realtime use.
 As these are just suggestions, they should be considered with a grain of salt:
