@@ -1,0 +1,23 @@
+sudo: required
+dist: trusty
+language: bash
+
+before_install:
+  - sudo apt-add-repository "deb http://archive.ubuntu.com/ubuntu trusty-backports main restricted universe multiverse"
+  - sudo apt-get -qq update
+
+install:
+  - sudo apt-get -t trusty-backports install shellcheck
+
+script:
+  - make check
+  - sudo make install
+  - realtime-suggestions
+
+branches:
+  only:
+    - /.*/
+
+notifications:
+  email: false
+# vim:set ts=2 sw=2 et:
