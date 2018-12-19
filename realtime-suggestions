@@ -251,7 +251,9 @@ check_coupled_interrupts() {
 
 check_irqbalance() {
   if pgrep -i irqbalance >/dev/null 2>&1; then
-    echo "$change The irqbalance service is running on your system. It might interfere, so consider disabling it."
+    echo "$info The irqbalance service is running on your system (which in general is good). However, don't use it, if you specifically want to dedicate processes or IRQs to single CPU cores."
+  else
+    echo "$change Running the irqbalance service can help spread the processing of interrupts over more than one CPU core."
   fi
 }
 
